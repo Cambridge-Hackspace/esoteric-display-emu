@@ -29,27 +29,23 @@ struct Args {
     #[arg(long)]
     bind: String,
     #[arg(long)]
-    colors: bool,
-    #[arg(long)]
     clock: f64,
 }
 
 struct AppState {
-    frame_data: Vec<u8>,
+    pixels: Vec<(u8, u8, u8)>,
+    is_color_mode: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let expected_bytes = if args.colors {
-        args.width * args.height * 3
-    } else {
-        args.width * args.height
-    };
+    let expected_pixels = args.width * args.height;
 
     let state = Arc::new(Mutex::new(AppState {
-        frame_data: vec![0; expected_bytes],
+        pixels: vec![(0, 0, 0); expected_pixels],
+        is_color_mode: false,
     }));
 
     let bind_addr = args.bind.clone();
@@ -65,16 +61,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok((size, _)) = socket.recv_from(&mut buf).await {
                 // process 10-byte DDP header
                 if size > 10 {
-                    // extract length from DDP header (bytes 8 and 9, big endian)
+                    // extract offset and length
+                    let offset = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+                    // extract length from DDP header
                     let payload_len = u16::from_be_bytes([buf[8], buf[9]]) as usize;
                     let end_idx = 10 + payload_len;
 
                     if size >= end_idx {
+                        let data_type = buf[2];
+                        let mut ttt = (data_type >> 3) & 0b111;
+                        let mut sss = data_type & 0b111;
+
+                        // apply defaults if undefined
+                        if ttt == 0 {
+                            ttt = 4;
+                        } // default to grayscale
+                        if sss == 0 {
+                            sss = 3;
+                        } // default to 8-bit
+
+                        // map sss to bytes per channel
+                        let bytes_per_channel = match sss {
+                            0..=3 => 1, // treat 1-bit, 4-bit, and 8-bit as pulling at least 1 byte
+                            4 => 2,     // 16-bit
+                            5 => 3,     // 24-bit
+                            6 => 4,     // 32-bit
+                            _ => 1,
+                        };
+
+                        let channels = match ttt {
+                            1 | 2 => 3, // RGB, HSL
+                            3 => 4,     // RGBW
+                            _ => 1,     // grayscale
+                        };
+
+                        let total_bytes_per_pixel = channels * bytes_per_channel;
+                        let is_color = matches!(ttt, 1 | 2 | 3);
+
                         let payload = &buf[10..end_idx];
                         let mut lock = state_clone.lock().unwrap();
 
-                        let copy_len = payload.len().min(lock.frame_data.len());
-                        lock.frame_data[..copy_len].copy_from_slice(&payload[..copy_len]);
+                        lock.is_color_mode = is_color;
+
+                        // calculate starting index based on the byte offset
+                        let start_pixel = offset / total_bytes_per_pixel;
+                        let mut pixel_idx = start_pixel;
+                        let mut chunk_idx = 0;
+
+                        // process the payload pixel by pixel
+                        while chunk_idx + total_bytes_per_pixel <= payload.len()
+                            && pixel_idx < lock.pixels.len()
+                        {
+                            let chunk = &payload[chunk_idx..chunk_idx + total_bytes_per_pixel];
+
+                            if is_color {
+                                let r = chunk[0];
+                                let g = chunk[bytes_per_channel];
+                                let b = chunk[bytes_per_channel * 2];
+                                lock.pixels[pixel_idx] = (r, g, b);
+                            } else {
+                                let gray = chunk[0];
+                                lock.pixels[pixel_idx] = (gray, gray, gray);
+                            }
+
+                            pixel_idx += 1;
+                            chunk_idx += total_bytes_per_pixel;
+                        }
                     }
                 }
             }
@@ -166,25 +218,22 @@ where
                 .title_bottom(marquee(full_bottom, available_width, marquee_tick))
                 .title_alignment(Alignment::Center);
 
-            let data = {
+            let (pixels, is_color) = {
                 let lock = state.lock().unwrap();
-                lock.frame_data.clone()
+                (lock.pixels.clone(), lock.is_color_mode)
             };
 
             let mut lines = Vec::with_capacity(args.height);
             for y in 0..args.height {
                 let mut spans = Vec::with_capacity(args.width);
                 for x in 0..args.width {
-                    if args.colors {
-                        let idx = (y * args.width + x) * 3;
-                        let r = *data.get(idx).unwrap_or(&0);
-                        let g = *data.get(idx + 1).unwrap_or(&0);
-                        let b = *data.get(idx + 2).unwrap_or(&0);
+                    let idx = y * args.width + x;
+                    let (r, g, b) = *pixels.get(idx).unwrap_or(&(0, 0, 0));
+
+                    if is_color {
                         spans.push(Span::styled("██", Style::default().fg(Color::Rgb(r, g, b))));
                     } else {
-                        let idx = y * args.width + x;
-                        let val = *data.get(idx).unwrap_or(&0);
-                        let chars = match val {
+                        let chars = match r {
                             0..=5 => "  ",
                             6..=25 => "░░",
                             26..=50 => "▒▒",
