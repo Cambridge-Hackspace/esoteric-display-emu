@@ -105,6 +105,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn marquee(text: &str, max_width: usize, tick: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_width || max_width == 0 {
+        return text.to_string();
+    }
+
+    let padded = format!("{}   *** ", text);
+    let chars: Vec<char> = padded.chars().collect();
+    let len = chars.len();
+    let offset = tick % len;
+
+    let mut result = String::with_capacity(max_width);
+    for i in 0..max_width {
+        result.push(chars[(offset + i) % len]);
+    }
+    result
+}
+
 fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     state: Arc<Mutex<AppState>>,
@@ -117,17 +135,35 @@ where
     let mut last_tick = Instant::now();
     let mut scroll_x: u16 = 0;
     let mut scroll_y: u16 = 0;
+    let start_time = Instant::now();
 
     loop {
         terminal.draw(|f| {
-            let size = f.area();
+            let term_area = f.area();
 
-            let title = format!(" Esoteric Display Emulator - {} ", args.bind);
+            // remember: each pixel is 2 chars
+            let target_width = (args.width * 2 + 2) as u16;
+            let target_height = (args.height + 2) as u16;
+
+            let draw_area = ratatui::layout::Rect {
+                x: term_area.x,
+                y: term_area.y,
+                width: target_width.min(term_area.width),
+                height: target_height.min(term_area.height),
+            };
+
+            let elapsed_secs = start_time.elapsed().as_secs_f64();
+            let marquee_tick = (elapsed_secs * 5.0) as usize;
+            let available_width = draw_area.width.saturating_sub(2) as usize;
+
+            let full_title = format!(" Esoteric Display Emulator - {} ", args.bind);
+            let full_bottom = " press CTRL + C or q to stop ";
+
             let block = Block::default()
-                .title(title)
+                .title(marquee(&full_title, available_width, marquee_tick))
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
-                .title_bottom(" press CTRL + C or q to stop ")
+                .title_bottom(marquee(full_bottom, available_width, marquee_tick))
                 .title_alignment(Alignment::Center);
 
             let data = {
@@ -165,7 +201,7 @@ where
                 .block(block)
                 .scroll((scroll_y, scroll_x));
 
-            f.render_widget(paragraph, size);
+            f.render_widget(paragraph, draw_area);
         })?;
 
         let timeout = tick_rate
