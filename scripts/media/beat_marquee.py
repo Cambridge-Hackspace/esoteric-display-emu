@@ -94,6 +94,7 @@ def audio_listener(device_index):
                 history.pop(0)
                 
             avg_energy = np.mean(history)
+            print(f"Energy: {energy:8.2f} | Avg: {avg_energy:8.2f} | Diff: {(energy / (avg_energy + 0.001)):.2f}x")
             
             # Beat logic: energy spikes above the moving average
             now = time.time()
